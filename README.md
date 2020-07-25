@@ -96,5 +96,6 @@ step2:
  [2]: https://www.bilibili.com/video/BV1xJ411B79h
  [3]: https://www.bilibili.com/video/BV1Jb411s7cx?from=search&seid=8893596527726771664
  [4]: https://blog.csdn.net/weixin_41542958/article/details/107403862
- [5]:https://github.com/73fc/DailySchedule/blob/master/rust%E5%AD%A6%E4%B9%A0/rust%E7%AE%97%E6%B3%95%E9%A2%98/%E7%AE%97%E6%B3%95%E9%A2%98.md
- [6]:https://github.com/73fc/DailySchedule/tree/master/rust%E5%AD%A6%E4%B9%A0/rust/rust%20%E7%BC%96%E7%A8%8B%E4%B9%8B%E9%81%93%E7%AC%AC%E5%8D%81%E7%AB%A0 
+ [5]: https://github.com/73fc/DailySchedule/blob/master/rust%E5%AD%A6%E4%B9%A0/rust%E7%AE%97%E6%B3%95%E9%A2%98/%E7%AE%97%E6%B3%95%E9%A2%98.md
+ [6]: https://github.com/73fc/DailySchedule/tree/master/rust%E5%AD%A6%E4%B9%A0/rust/rust%20%E7%BC%96%E7%A8%8B%E4%B9%8B%E9%81%93%E7%AC%AC%E5%8D%81%E7%AB%A0 
+ [7]: https://github.com/73fc/DailySchedule/tree/master/rust%E5%AD%A6%E4%B9%A0/rustlings
