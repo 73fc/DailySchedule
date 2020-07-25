@@ -5,7 +5,7 @@
 ## 总体完成进度
 
 step0: 
-   1. rustling练习代码
+   1. rustling[练习代码][7]
    1. rust写leetcode [15道算法题][5]
    1. rust学习代码+<<rust编程之道>>第十章[代码练习][6]
    
