@@ -12,7 +12,7 @@ step0:
    [rust环境安装时遇到的部分问题及其解决办法][4]
 
 step2:
-
+   [安装wsl2 遇到的问题(更新win10以及加入预览计划)][8]
 ## Day1 7月4号
  1. 搭建了一个linux虚拟机环境专用学习和实验
  1. 在 b站看了一些rust的学习视频，了解了一些rust语言的特性。
@@ -63,12 +63,12 @@ step2:
  1. 感觉时间紧迫，准备开始做实验了。
 
 ## Day17 7月20号 
-  1. 整理一些脑图笔记，以及在安装rust环境过程中遇到的问题。
+  1. 整理一些脑图笔记，以及将安装rust环境过程中遇到的问题整理到[博客][4]。
   1. 安装wsl，因为自己的电脑版本实在太老了，所以折腾了一天才弄好。
   (之前因为个人的原因，以及其他学科复习的所以耽误了一些进度。)
 
 ## Day18 7月21号
-   1. 将昨天安装wls遇到的问题整理到博客中。
+   1. 将昨天安装wls遇到的问题整理到[博客][8]中。
    1. 补充rust写算法题的内容。
 
 ## Day19 7月22号
@@ -100,3 +100,4 @@ step2:
  [5]: https://github.com/73fc/DailySchedule/blob/master/rust%E5%AD%A6%E4%B9%A0/rust%E7%AE%97%E6%B3%95%E9%A2%98/%E7%AE%97%E6%B3%95%E9%A2%98.md
  [6]: https://github.com/73fc/DailySchedule/tree/master/rust%E5%AD%A6%E4%B9%A0/rust/rust%20%E7%BC%96%E7%A8%8B%E4%B9%8B%E9%81%93%E7%AC%AC%E5%8D%81%E7%AB%A0 
  [7]: https://github.com/73fc/DailySchedule/tree/master/rust%E5%AD%A6%E4%B9%A0/rustlings
+ [8]: https://blog.csdn.net/weixin_41542958/article/details/107577542
