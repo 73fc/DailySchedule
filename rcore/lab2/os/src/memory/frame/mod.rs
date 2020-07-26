@@ -1,5 +1,3 @@
-//! 物理页的分配与回收
-
 mod allocator;
 mod frame_tracker;
 

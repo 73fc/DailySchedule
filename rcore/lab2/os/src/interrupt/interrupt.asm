@@ -37,7 +37,8 @@ __interrupt:
     # 将原来的 sp（sp 又名 x2）写入 2 位置
     addi    x1, sp, 34*8
     SAVE    x1, 2
-    # 保存 x3 至 x31
+    
+    # 保存 x3 至 x31，通用寄存器(共32个)
     .set    n, 3
     .rept   29
         SAVE_N  %n
@@ -71,7 +72,7 @@ __restore:
 
     # 恢复通用寄存器
     LOAD    x1, 1
-    # 恢复 x3 至 x31
+    # 恢复 x3 至 x31，通用寄存器(共32个)
     .set    n, 3
     .rept   29
         LOAD_N  %n

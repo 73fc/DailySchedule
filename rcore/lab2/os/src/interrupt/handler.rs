@@ -2,8 +2,10 @@ use super::context::Context;
 use super::timer;
 use riscv::register::{
     scause::{Exception, Interrupt, Scause, Trap},
-     stvec,
+    sie, stvec,
 };
+
+
 
 global_asm!(include_str!("./interrupt.asm"));
 
@@ -21,7 +23,6 @@ pub fn init() {
     }
 }
 
-
 /// 中断的处理入口
 /// 
 /// `interrupt.asm` 首先保存寄存器至 Context，其作为参数和 scause 以及 stval 一并传入此函数
@@ -33,12 +34,17 @@ pub fn handle_interrupt(context: &mut Context, scause: Scause, stval: usize) {
         Trap::Exception(Exception::Breakpoint) => breakpoint(context),
         // 时钟中断
         Trap::Interrupt(Interrupt::SupervisorTimer) => supervisor_timer(context),
-        // lab1-practice
-        Trap::Exception(Exception::LoadFault) => load_fault(context, scause, stval),
         // 其他情况，终止当前线程
+        Trap::Exception(Exception::LoadFault)=> {
+            if let 0=stval{
+                println!("Success");
+            }
+            panic!("LoadFault：非法访问");
+        },
         _ => fault(context, scause, stval),
     }
 }
+
 
 /// 处理 ebreak 断点
 /// 
@@ -46,6 +52,7 @@ pub fn handle_interrupt(context: &mut Context, scause: Scause, stval: usize) {
 fn breakpoint(context: &mut Context) {
     println!("Breakpoint at 0x{:x}", context.sepc);
     context.sepc += 2;
+	//context.sepc = 0;
 }
 
 /// 处理时钟中断
@@ -53,20 +60,6 @@ fn breakpoint(context: &mut Context) {
 /// 目前只会在 [`timer`] 模块中进行计数
 fn supervisor_timer(_: &Context) {
     timer::tick();
-}
-
-fn load_fault(context: &mut Context, scause: Scause, stval: usize){
-    if stval == 0x0{
-        panic!("SUCCESS!")
-    }
-    else{
-        panic!(
-            "LoadFault: {:?}\n{:x?}\nstval: {:x}",
-            scause.cause(),
-            context,
-            stval
-        )
-    }
 }
 
 /// 出现未能解决的异常
@@ -78,3 +71,4 @@ fn fault(context: &mut Context, scause: Scause, stval: usize) {
         stval
     );
 }
+

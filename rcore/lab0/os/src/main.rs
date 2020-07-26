@@ -1,21 +1,19 @@
+//! # 全局属性
+//! - `#![no_std]`  
+//!   禁用标准库
 #![no_std]
 //!
 //! - `#![no_main]`  
 //!   不使用 `main` 函数等全部 Rust-level 入口点来作为程序入口
 #![no_main]
-//!
-//! - `#![deny(missing_docs)]`  
-//!   任何没有注释的地方都会产生警告：这个属性用来压榨写实验指导的学长，同学可以删掉了
-#![warn(missing_docs)]
 //! # 一些 unstable 的功能需要在 crate 层级声明后才可以使用
-//! - `#![feature(asm)]`  
+//! - `#![feature(llvm_asm)]`  
 //!   内嵌汇编
-#![feature(asm)]
+#![feature(llvm_asm)]
 //!
 //! - `#![feature(global_asm)]`  
 //!   内嵌整个汇编文件
 #![feature(global_asm)]
-#![feature(llvm_asm)]
 //!
 //! - `#![feature(panic_info_message)]`  
 //!   panic! 时，获取其中的信息并打印
@@ -35,5 +33,6 @@ global_asm!(include_str!("entry.asm"));
 #[no_mangle]
 pub extern "C" fn rust_main() -> ! {
     println!("Hello rCore-Tutorial!");
+    println!("finish the lab0(fc)");
     panic!("end of rust_main")
 }

@@ -35,6 +35,12 @@ pub fn handle_interrupt(context: &mut Context, scause: Scause, stval: usize) {
         // 时钟中断
         Trap::Interrupt(Interrupt::SupervisorTimer) => supervisor_timer(context),
         // 其他情况，终止当前线程
+        Trap::Exception(Exception::LoadFault)=> {
+            if let 0=stval{
+                println!("Success");
+            }
+            panic!("LoadFault：非法访问");
+        },
         _ => fault(context, scause, stval),
     }
 }
@@ -44,7 +50,8 @@ pub fn handle_interrupt(context: &mut Context, scause: Scause, stval: usize) {
 /// 继续执行，其中 `sepc` 增加 2 字节，以跳过当前这条 `ebreak` 指令
 fn breakpoint(context: &mut Context) {
     println!("Breakpoint at 0x{:x}", context.sepc);
-    context.sepc += 2;
+    //context.sepc += 2;
+    context.sepc = 0;
 }
 
 /// 处理时钟中断
