@@ -4,15 +4,19 @@
 
 ## 总体完成进度
 
-step0: 
+### step 0
+
    1. rustling[练习代码][7]
    1. rust写leetcode [15道算法题][5]
    1. rust学习代码+<<rust编程之道>>第十章[代码练习][6]
    
-   [rust环境安装时遇到的部分问题及其解决办法][4]
+   * [rust环境安装时遇到的部分问题及其解决办法][4]
 
-step2:
-   [安装wsl2 遇到的问题(更新win10以及加入预览计划)][8]
+### step 2
+
+   1. 实验代码: [lab0][9],[lab1][10],[lab2][11],[lab3][12],[lab4][13],[lab5][14],[lab6][15]
+   * [安装wsl2 遇到的问题(更新win10以及加入预览计划)][8]
+  
 ## Day1 7月4号
  1. 搭建了一个linux虚拟机环境专用学习和实验
  1. 在 b站看了一些rust的学习视频，了解了一些rust语言的特性。
@@ -101,3 +105,10 @@ step2:
  [6]: https://github.com/73fc/DailySchedule/tree/master/rust%E5%AD%A6%E4%B9%A0/rust/rust%20%E7%BC%96%E7%A8%8B%E4%B9%8B%E9%81%93%E7%AC%AC%E5%8D%81%E7%AB%A0 
  [7]: https://github.com/73fc/DailySchedule/tree/master/rust%E5%AD%A6%E4%B9%A0/rustlings
  [8]: https://blog.csdn.net/weixin_41542958/article/details/107577542
+ [9]: https://github.com/73fc/DailySchedule/tree/master/rcore/lab0
+ [10]: https://github.com/73fc/DailySchedule/tree/master/rcore/lab1
+ [11]: https://github.com/73fc/DailySchedule/tree/master/rcore/lab2
+ [12]: https://github.com/73fc/DailySchedule/tree/master/rcore/lab3
+ [13]: https://github.com/73fc/DailySchedule/tree/master/rcore/lab4
+ [14]: https://github.com/73fc/DailySchedule/tree/master/rcore/lab5
+ [15]: https://github.com/73fc/DailySchedule/tree/master/rcore/lab6
