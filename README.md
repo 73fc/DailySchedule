@@ -15,6 +15,7 @@
 ### step 2
 
    1. 实验代码: [lab0][9],[lab1][10],[lab2][11],[lab3][12],[lab4][13],[lab5][14],[lab6][15]
+   1. 实验习题代码 [lab1实验][16]
    * [安装wsl2 遇到的问题(更新win10以及加入预览计划)][8]
   
 ## Day1 7月4号
@@ -129,3 +130,4 @@
  [13]: https://github.com/73fc/DailySchedule/tree/master/rcore/lab4
  [14]: https://github.com/73fc/DailySchedule/tree/master/rcore/lab5
  [15]: https://github.com/73fc/DailySchedule/tree/master/rcore/lab6
+ [16]: https://github.com/73fc/DailySchedule/tree/master/rcore/lab1%20%E5%AE%9E%E9%AA%8C%E9%A2%98
