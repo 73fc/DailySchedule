@@ -5,7 +5,7 @@
 1. [lab0实验报告][4]
 1. [lab1实验报告][5]
 1. [lab2实验报告][7]
-1. lab3实验报告(实验三理论部分过多，具体步骤没前面清晰)
+1. [lab3实验报告][8](实验三理论部分过多，具体步骤没前面清晰)
 1. (lab4-lab5实验报告暂未完成。)
 ---
 # lab0
@@ -1727,6 +1727,958 @@ fn test_page() -> !{
 ```
 实验结果以截图的方式存储在lab2文件夹中，居然内容见GitHub。
 
+# lab3
+[lab3实验指导书][9]
+lb3主要涉及以下过程
+* 虚拟地址和物理地址的概念和关系
+* 利用页表完成虚拟地址到物理地址的映射
+* 实现内核的重映射
+实验完成后目录结构如下：
+```
+Project
+│  rust-toolchain
+│
+└─os
+    │  .gitignore
+    │  Cargo.lock
+    │  Cargo.toml
+    │  Makefile
+    │
+    ├─.cargo
+    │      config
+    │
+    └─src
+        │  console.rs
+        │  entry.asm
+        │  linker.ld
+        │  main.rs
+        │  panic.rs
+        │  sbi.rs
+        │
+        ├─algorithm
+        │  │  Cargo.toml
+        │  │  README.md
+        │  │
+        │  └─src
+        │      │  lib.rs
+        │      │  unsafe_wrapper.rs
+        │      │
+        │      ├─allocator
+        │      │      mod.rs
+        │      │      segment_tree_allocator.rs
+        │      │      stacked_allocator.rs
+        │      │
+        │      └─scheduler
+        │              fifo_scheduler.rs
+        │              hrrn_scheduler.rs
+        │              mod.rs
+        │
+        ├─interrupt
+        │      context.rs
+        │      handler.rs
+        │      interrupt.asm
+        │      mod.rs
+        │      timer.rs
+        │
+        └─memory
+            │  address.rs
+            │  config.rs
+            │  heap.rs
+            │  mod.rs
+            │  range.rs
+            │
+            ├─frame
+            │      allocator.rs
+            │      frame_tracker.rs
+            │      mod.rs
+            │
+            └─mapping
+                    mapping.rs
+                    memory_set.rs
+                    mod.rs
+                    page_table.rs
+                    page_table_entry.rs
+                    segment.rs
+```
+# 一，从虚拟内存到物理内存
+
+在之前的Lb2中做了一个简单的内核，但在真正的操作系统中为了让其他的程序能方便的运行在操作系统上，我们需要引入多任务的概念，而其中最为重要的就是让程序各自占有各自的位置，同时运行。而在程序执行的角度上所看到的地址空间，成为虚拟内存，访问虚拟内存的地址也就是虚拟地址，与之对应的是物理地址，为了防止多个应用访问同一段内存，这时就需要引入一种机制，也就是页表，通过页表维护虚拟地址到物理地址的映射，并能有效防止映射到同一段内存地址。
+__sv39__
+Sv39 模式是基于页的，在这里物理页号为 44 位，每个物理页大小为 4KB。同理，我们对于虚拟内存定义虚拟页（Page）以及虚拟页号（VPN, Virtual Page Number) 。在这里虚拟页号为 27 位，每个虚拟页大小也为 4KB。物理地址和虚拟地址的最后 12 位都表示页内偏移，即表示该地址在所在物理页（虚拟页）上的什么位置。
+页表的作用就是将虚拟地址所在的虚拟页映射到一个物理页，然后再在这个物理页上根据页内偏移找到物理地址，从而完成映射。
+
+__页表项__
+页表项用来描述一个虚拟页号如何映射到物理页号的。
+Sv39 模式里面的一个页表项大小为 64 位（即 8 字节）。其中第 53-10 共 44 位为一个物理页号，表示这个虚拟页号映射到的物理页号。后面的第 9-0 位则描述页的相关状态信息。
+* V 表示这个页表项是否合法。如果为 0 表示不合法，此时页表项其他位的值都会被忽略。
+* R,W,X 分别表示是否可读（Readable）、可写（Writable）和可执行（Executable）。
+* 如果 R,W,X 均为 0，文档上说这表示这个页表项指向下一级页表。
+* U 为 1 表示用户态运行的程序可以通过该页表项完成地址映射。需要将 S 态的状态寄存器 sstatus 上的 SUM (permit Supervisor User Memory access) 位手动设置为 1 才可以访问通过这些 U 为 1 的页表项进行映射的用户态内存空间。
+* 
+__多级页表__
+在 Sv39 模式中我们采用三级页表
+
+__页表基址__
+页表寄存器 satp：页表的基址（起始地址）一般会保存在一个特殊的寄存器中。
+
+__快表（TLB）__
+使用快表（TLB, Translation Lookaside Buffer）来作为虚拟页号到物理页号的映射的缓存。
+注意：手动修改一个页表项之后，也修改了映射，但 TLB 并不会自动刷新，我们也需要使用 sfence.vma 指令刷新 TLB。如果不加参数的，sfence.vma 会刷新整个 TLB。你可以在后面加上一个虚拟地址，这样 sfence.vma 只会刷新这个虚拟地址的映射。
+
+__修改内核__
+Lb2的内核实现并未使能页表机制，实际上内核是直接在物理地址空间上运行的。
+所以首先需要把内核的运行环境从物理地址空间转移到虚拟地址空间：将内核代码放在虚拟地址空间中以 0xffffffff80200000 开头的一段高地址空间中。
+
+# 二，修改内核 
+__第 1 步__
+修改os/src/linker.ld如下
+```
+/* Linker Script 语法可以参见：http://www.scoberlin.de/content/media/http/informatik/gcc_docs/ld_3.html */
+
+/* 目标架构 */
+OUTPUT_ARCH(riscv)
+
+/* 执行入口 */
+ENTRY(_start)
+
+/* 数据存放起始地址 */
+BASE_ADDRESS = 0xffffffff80200000; /* 修改为虚拟地址 */
+
+SECTIONS
+{
+    /* . 表示当前地址（location counter） */
+    . = BASE_ADDRESS;
+
+    /* start 符号表示全部的开始位置 */
+    kernel_start = .;
+
+    /* 加入对齐 */
+    . = ALIGN(4K);
+    text_start = .;
+
+    /* .text 字段 */
+    .text : {
+        /* 把 entry 函数放在最前面 */
+        *(.text.entry)
+        /* 要链接的文件的 .text 字段集中放在这里 */
+        *(.text .text.*)
+    }
+
+    /* 加入对齐 */
+    . = ALIGN(4K);
+    rodata_start = .;
+
+    /* .rodata 字段 */
+    .rodata : {
+        /* 要链接的文件的 .rodata 字段集中放在这里 */
+        *(.rodata .rodata.*)
+    }
+
+    /* 加入对齐 */
+    . = ALIGN(4K);
+    data_start = .;
+
+    /* .data 字段 */
+    .data : {
+        /* 要链接的文件的 .data 字段集中放在这里 */
+        *(.data .data.*)
+    }
+
+    /* 加入对齐 */
+    . = ALIGN(4K);
+    bss_start = .;
+
+    /* .bss 字段 */
+    .bss : {
+        /* 要链接的文件的 .bss 字段集中放在这里 */
+        *(.sbss .bss .bss.*)
+    }
+
+    /* 结束地址 */
+    /* 加入对齐 */
+    . = ALIGN(4K);
+    kernel_end = .;
+}
+```
+
+修改对应 os/src/memory/config.rs 中的 KERNEL_END_ADDRESS 修改为虚拟地址并加入偏移量：
+```
+lazy_static! {
+    /// 内核代码结束的地址，即可以用来分配的内存起始地址
+    /// 
+    /// 因为 Rust 语言限制，我们只能将其作为一个运行时求值的 static 变量，而不能作为 const
+    pub static ref KERNEL_END_ADDRESS: VirtualAddress = VirtualAddress(kernel_end as usize); 
+}
+
+/// 内核使用线性映射的偏移量
+pub const KERNEL_MAP_OFFSET: usize = 0xffff_ffff_0000_0000;
+```
+__第 3 步__ 
+
+最后需要在启动时、在进入 rust_main 之前我们要完成一个从物理地址访存模式到虚拟访存模式的转换，同时这也意味着，我们要写一个简单的页表，完成这个线性映射。
+修改os/src/entry.asm
+```
+# 操作系统启动时所需的指令以及字段
+#
+# 我们在 linker.ld 中将程序入口设置为了 _start，因此在这里我们将填充这个标签
+# 它将会执行一些必要操作，然后跳转至我们用 rust 编写的入口函数
+#
+# 关于 RISC-V 下的汇编语言，可以参考 https://github.com/riscv/riscv-asm-manual/blob/master/riscv-asm.md
+# %hi 表示取 [12,32) 位，%lo 表示取 [0,12) 位
+
+    .section .text.entry
+    .globl _start
+# 目前 _start 的功能：将预留的栈空间写入 $sp，然后跳转至 rust_main
+_start:
+    # 计算 boot_page_table 的物理页号
+    lui t0, %hi(boot_page_table)
+    li t1, 0xffffffff00000000
+    sub t0, t0, t1
+    srli t0, t0, 12
+    # 8 << 60 是 satp 中使用 Sv39 模式的记号
+    li t1, (8 << 60)
+    or t0, t0, t1
+    # 写入 satp 并更新 TLB
+    csrw satp, t0
+    sfence.vma
+
+    # 加载栈地址
+    lui sp, %hi(boot_stack_top)
+    addi sp, sp, %lo(boot_stack_top)
+    # 跳转至 rust_main
+    lui t0, %hi(rust_main)
+    addi t0, t0, %lo(rust_main)
+    jr t0
+
+    # 回忆：bss 段是 ELF 文件中只记录长度，而全部初始化为 0 的一段内存空间
+    # 这里声明字段 .bss.stack 作为操作系统启动时的栈
+    .section .bss.stack
+    .global boot_stack
+boot_stack:
+    # 16K 启动栈大小
+    .space 4096 * 16
+    .global boot_stack_top
+boot_stack_top:
+    # 栈结尾
+
+    # 初始内核映射所用的页表
+    .section .data
+    .align 12
+boot_page_table:
+    .quad 0
+    .quad 0
+    # 第 2 项：0x8000_0000 -> 0x8000_0000，0xcf 表示 VRWXAD 均为 1
+    .quad (0x80000 << 10) | 0xcf
+    .zero 507 * 8
+    # 第 510 项：0xffff_ffff_8000_0000 -> 0x8000_0000，0xcf 表示 VRWXAD 均为 1
+    .quad (0x80000 << 10) | 0xcf
+    .quad 0
+```
+# 三，实现页表
+思路是把一个分配好的物理页（即会自动销毁的 FrameTracker）拿来把数据填充作为页表，而页表中的每一项是一个 8 字节的页表项。
+
+__第 1 步__
+加入两个关于位操作的 crate，在os/Cargo.toml中加入依赖。
+（由于之前以及将本项目需要的依赖全加入了，所以这一步可跳过）
+```
+bitflags = "1.2.1"
+bit_field = "0.10.0"
+```
+
+__第 2 步__
+修改os/src/memory/address.rs。构建通过虚拟页号获得三级 VPN 的函数。
+```
+impl VirtualPageNumber {
+    /// 得到一、二、三级页号
+    pub fn levels(self) -> [usize; 3] {
+        [
+            self.0.get_bits(18..27),
+            self.0.get_bits(9..18),
+            self.0.get_bits(0..9),
+        ]
+    }
+}
+```
+
+__第 3 步__ 构建页表项
+建立os/src/memory/mapping/page_table_entry.rs
+```
+/// Sv39 结构的页表项
+#[derive(Copy, Clone, Default)]
+pub struct PageTableEntry(usize);
+
+/// Sv39 页表项中标志位的位置
+const FLAG_RANGE: core::ops::Range<usize> = 0..8;
+/// Sv39 页表项中物理页号的位置
+const PAGE_NUMBER_RANGE: core::ops::Range<usize> = 10..54;
+
+impl PageTableEntry {
+    /// 将相应页号和标志写入一个页表项
+    pub fn new(page_number: Option<PhysicalPageNumber>, mut flags: Flags) -> Self {
+        // 标志位中是否包含 Valid 取决于 page_number 是否为 Some
+        flags.set(Flags::VALID, page_number.is_some());
+        Self(
+            *0usize
+                .set_bits(FLAG_RANGE, flags.bits() as usize)
+                .set_bits(PAGE_NUMBER_RANGE, page_number.unwrap_or_default().into()),
+        )
+    }
+    /// 设置物理页号，同时根据 ppn 是否为 Some 来设置 Valid 位
+    pub fn update_page_number(&mut self, ppn: Option<PhysicalPageNumber>) {
+        if let Some(ppn) = ppn {
+            self.0
+                .set_bits(FLAG_RANGE, (self.flags() | Flags::VALID).bits() as usize)
+                .set_bits(PAGE_NUMBER_RANGE, ppn.into());
+        } else {
+            self.0
+                .set_bits(FLAG_RANGE, (self.flags() - Flags::VALID).bits() as usize)
+                .set_bits(PAGE_NUMBER_RANGE, 0);
+        }
+    }
+    /// 获取页号
+    pub fn page_number(&self) -> PhysicalPageNumber {
+        PhysicalPageNumber::from(self.0.get_bits(10..54))
+    }
+    /// 获取地址
+    pub fn address(&self) -> PhysicalAddress {
+        PhysicalAddress::from(self.page_number())
+    }
+    /// 获取标志位
+    pub fn flags(&self) -> Flags {
+        unsafe { Flags::from_bits_unchecked(self.0.get_bits(..8) as u8) }
+    }
+    /// 是否为空（可能非空也非 Valid）
+    pub fn is_empty(&self) -> bool {
+        self.0 == 0
+    }
+}
+
+impl core::fmt::Debug for PageTableEntry {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
+        formatter
+            .debug_struct("PageTableEntry")
+            .field("value", &self.0)
+            .field("page_number", &self.page_number())
+            .field("flags", &self.flags())
+            .finish()
+    }
+}
+
+bitflags! {
+    /// 页表项中的 8 个标志位
+    #[derive(Default)]
+    pub struct Flags: u8 {
+        /// 有效位
+        const VALID =       1 << 0;
+        /// 可读位
+        const READABLE =    1 << 1;
+        /// 可写位
+        const WRITABLE =    1 << 2;
+        /// 可执行位
+        const EXECUTABLE =  1 << 3;
+        /// 用户位
+        const USER =        1 << 4;
+        /// 全局位，我们不会使用
+        const GLOBAL =      1 << 5;
+        /// 已使用位，用于替换算法
+        const ACCESSED =    1 << 6;
+        /// 已修改位，用于替换算法
+        const DIRTY =       1 << 7;
+    }
+}
+```
+__第 4 步__  建立页表
+多个页表项组成物理页，再加上多级添加映射封装成页表。
+创建os/src/memory/mapping/page_table.rs文件，编辑内容如下：
+```
+/// 存有 512 个页表项的页表
+///
+/// 注意我们不会使用常规的 Rust 语法来创建 `PageTable`。相反，我们会分配一个物理页，
+/// 其对应了一段物理内存，然后直接把其当做页表进行读写。我们会在操作系统中用一个「指针」
+/// [`PageTableTracker`] 来记录这个页表。
+#[repr(C)]
+pub struct PageTable {
+    pub entries: [PageTableEntry; PAGE_SIZE / 8],
+}
+
+impl PageTable {
+    /// 将页表清零
+    pub fn zero_init(&mut self) {
+        self.entries = [Default::default(); PAGE_SIZE / 8];
+    }
+}
+
+/// 类似于 [`FrameTracker`]，用于记录某一个内存中页表
+///
+/// 注意到，「真正的页表」会放在我们分配出来的物理页当中，而不应放在操作系统的运行栈或堆中。
+/// 而 `PageTableTracker` 会保存在某个线程的元数据中（也就是在操作系统的堆上），指向其真正的页表。
+///
+/// 当 `PageTableTracker` 被 drop 时，会自动 drop `FrameTracker`，进而释放帧。
+pub struct PageTableTracker(pub FrameTracker);
+
+impl PageTableTracker {
+    /// 将一个分配的帧清零，形成空的页表
+    pub fn new(frame: FrameTracker) -> Self {
+        let mut page_table = Self(frame);
+        page_table.zero_init();
+        page_table
+    }
+    /// 获取物理页号
+    pub fn page_number(&self) -> PhysicalPageNumber {
+        self.0.page_number()
+    }
+}
+```
+
+# 四，实现内核重映射
+构造了一个简单映射使得内核能够运行在虚拟空间上，但是这个映射是比较粗糙的
+我们知道一个程序通常含有下面几段：
+
+* .text 段：存放代码，需要可读、可执行的，但不可写；
+*.rodata 段：存放只读数据，顾名思义，需要可读，但不可写亦不可执行；
+* .data 段：存放经过初始化的数据，需要可读、可写；
+* .bss 段：存放零初始化的数据，需要可读、可写。
+我们看到各个段之间的访问权限是不同的。在现在的映射，我们甚至可以修改内核 .text 段的代码。因为我们通过一个标志位 W 为 1 的页表项完成映射。
+
+因此，我们考虑对这些段分别进行重映射，使得他们的访问权限被正确设置。
+
+__第 1 步__ 创建内存段
+创建os/src/memory/mapping/segment.rs，编辑内容如下：
+```
+//! 映射类型 [`MapType`] 和映射片段 [`Segment`]
+
+use crate::memory::{address::*, mapping::Flags, range::Range};
+
+/// 映射的类型
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum MapType {
+    /// 线性映射，操作系统使用
+    Linear,
+    /// 按帧分配映射
+    Framed,
+}
+
+/// 一个映射片段（对应旧 tutorial 的 `MemoryArea`）
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Segment {
+    /// 映射类型
+    pub map_type: MapType,
+    /// 所映射的虚拟地址
+    pub range: Range<VirtualAddress>,
+    /// 权限标志
+    pub flags: Flags,
+}
+
+impl Segment {
+    /// 遍历对应的物理地址（如果可能）
+    pub fn iter_mapped(&self) -> Option<impl Iterator<Item = PhysicalPageNumber>> {
+        match self.map_type {
+            // 线性映射可以直接将虚拟地址转换
+            MapType::Linear => Some(self.page_range().into().iter()),
+            // 按帧映射无法直接获得物理地址，需要分配
+            MapType::Framed => None,
+        }
+    }
+
+    /// 将地址相应地上下取整，获得虚拟页号区间
+    pub fn page_range(&self) -> Range<VirtualPageNumber> {
+        Range::from(
+            VirtualPageNumber::floor(self.range.start)..VirtualPageNumber::ceil(self.range.end),
+        )
+    }
+}
+
+```
+
+__第 2 步__ 创建映射
+创建os/src/memory/mapping/mapping.rs文件，编辑内容如下：
+```
+#[derive(Default)]
+/// 某个线程的内存映射关系
+pub struct Mapping {
+    /// 保存所有使用到的页表
+    page_tables: Vec<PageTableTracker>,
+    /// 根页表的物理页号
+    root_ppn: PhysicalPageNumber,
+    /// 所有分配的物理页面映射信息
+    mapped_pairs: VecDeque<(VirtualPageNumber, FrameTracker)>,
+}
+
+
+impl Mapping {
+    /// 将当前的映射加载到 `satp` 寄存器并记录
+    pub fn activate(&self) {
+        // satp 低 27 位为页号，高 4 位为模式，8 表示 Sv39
+        let new_satp = self.root_ppn.0 | (8 << 60);
+        unsafe {
+            // 将 new_satp 的值写到 satp 寄存器
+            llvm_asm!("csrw satp, $0" :: "r"(new_satp) :: "volatile");
+            // 刷新 TLB
+            llvm_asm!("sfence.vma" :::: "volatile");
+        }
+    }
+
+    /// 创建一个有根节点的映射
+    pub fn new() -> MemoryResult<Mapping> {
+        let root_table = PageTableTracker::new(FRAME_ALLOCATOR.lock().alloc()?);
+        let root_ppn = root_table.page_number();
+        Ok(Mapping {
+            page_tables: vec![root_table],
+            root_ppn,
+            mapped_pairs: VecDeque::new(),
+        })
+    }
+
+    /// 加入一段映射，可能会相应地分配物理页面
+    ///
+    /// 未被分配物理页面的虚拟页号暂时不会写入页表当中，它们会在发生 PageFault 后再建立页表项。
+    pub fn map(&mut self, segment: &Segment, init_data: Option<&[u8]>) -> MemoryResult<()> {
+        match segment.map_type {
+            // 线性映射，直接对虚拟地址进行转换
+            MapType::Linear => {
+                for vpn in segment.page_range().iter() {
+                    self.map_one(vpn, Some(vpn.into()), segment.flags | Flags::VALID)?;
+                }
+                // 拷贝数据
+                if let Some(data) = init_data {
+                    unsafe {
+                        (&mut *slice_from_raw_parts_mut(segment.range.start.deref(), data.len()))
+                            .copy_from_slice(data);
+                    }
+                }
+            }
+            // 需要分配帧进行映射
+            MapType::Framed => {
+                for vpn in segment.page_range().iter() {
+                    // 如果有初始化数据，找到相应的数据
+                    let page_data = if init_data.is_none() || init_data.unwrap().is_empty() {
+                        [0u8; PAGE_SIZE]
+                    } else {
+                        // 这里必须进行一些调整，因为传入的数据可能并非按照整页对齐
+
+                        // 传入的初始化数据
+                        let init_data = init_data.unwrap();
+                        // 整理后将要返回的一整个页面的数据
+                        let mut page_data = [0u8; PAGE_SIZE];
+
+                        // 拷贝时必须考虑区间与整页不对齐的情况
+                        //    start（仅第一页时非零）
+                        //      |        stop（仅最后一页时非零）
+                        // 0    |---data---|          4096
+                        // |------------page------------|
+                        let page_address = VirtualAddress::from(vpn);
+                        let start = if segment.range.start > page_address {
+                            segment.range.start - page_address
+                        } else {
+                            0
+                        };
+                        let stop = min(PAGE_SIZE, segment.range.end - page_address);
+                        // 计算来源和目标区间并进行拷贝
+                        let dst_slice = &mut page_data[start..stop];
+                        let src_slice = &init_data[(page_address + start - segment.range.start)
+                            ..(page_address + stop - segment.range.start)];
+                        dst_slice.copy_from_slice(src_slice);
+
+                        page_data
+                    };
+
+                    // 建立映射
+                    let mut frame = FRAME_ALLOCATOR.lock().alloc()?;
+                    // 更新页表
+                    self.map_one(vpn, Some(frame.page_number()), segment.flags)?;
+                    // 写入数据
+                    (*frame).copy_from_slice(&page_data);
+                    // 保存
+                    self.mapped_pairs.push_back((vpn, frame));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// 移除一段映射
+    pub fn unmap(&mut self, segment: &Segment) {
+        for vpn in segment.page_range().iter() {
+            let entry = self.find_entry(vpn).unwrap();
+            assert!(!entry.is_empty());
+            // 从页表中清除项
+            entry.clear();
+        }
+    }
+
+    /// 找到给定虚拟页号的三级页表项
+    ///
+    /// 如果找不到对应的页表项，则会相应创建页表
+    pub fn find_entry(&mut self, vpn: VirtualPageNumber) -> MemoryResult<&mut PageTableEntry> {
+        // 从根页表开始向下查询
+        // 这里不用 self.page_tables[0] 避免后面产生 borrow-check 冲突（我太菜了）
+        let root_table: &mut PageTable = PhysicalAddress::from(self.root_ppn).deref_kernel();
+        let mut entry = &mut root_table.entries[vpn.levels()[0]];
+        for vpn_slice in &vpn.levels()[1..] {
+            if entry.is_empty() {
+                // 如果页表不存在，则需要分配一个新的页表
+                let new_table = PageTableTracker::new(FRAME_ALLOCATOR.lock().alloc()?);
+                let new_ppn = new_table.page_number();
+                // 将新页表的页号写入当前的页表项
+                *entry = PageTableEntry::new(Some(new_ppn), Flags::VALID);
+                // 保存页表
+                self.page_tables.push(new_table);
+            }
+            // 进入下一级页表（使用偏移量来访问物理地址）
+            entry = &mut entry.get_next_table().entries[*vpn_slice];
+        }
+        // 此时 entry 位于第三级页表
+        Ok(entry)
+    }
+
+    /// 查找虚拟地址对应的物理地址
+    pub fn lookup(va: VirtualAddress) -> Option<PhysicalAddress> {
+        let mut current_ppn;
+        unsafe {
+            llvm_asm!("csrr $0, satp" : "=r"(current_ppn) ::: "volatile");
+            current_ppn ^= 8 << 60;
+        }
+
+        let root_table: &PageTable =
+            PhysicalAddress::from(PhysicalPageNumber(current_ppn)).deref_kernel();
+        let vpn = VirtualPageNumber::floor(va);
+        let mut entry = &root_table.entries[vpn.levels()[0]];
+        // 为了支持大页的查找，我们用 length 表示查找到的物理页需要加多少位的偏移
+        let mut length = 12 + 2 * 9;
+        for vpn_slice in &vpn.levels()[1..] {
+            if entry.is_empty() {
+                return None;
+            }
+            if entry.has_next_level() {
+                length -= 9;
+                entry = &mut entry.get_next_table().entries[*vpn_slice];
+            } else {
+                break;
+            }
+        }
+        let base = PhysicalAddress::from(entry.page_number()).0;
+        let offset = va.0 & ((1 << length) - 1);
+        Some(PhysicalAddress(base + offset))
+    }
+
+    /// 为给定的虚拟 / 物理页号建立映射关系
+    fn map_one(
+        &mut self,
+        vpn: VirtualPageNumber,
+        ppn: Option<PhysicalPageNumber>,
+        flags: Flags,
+    ) -> MemoryResult<()> {
+        // 定位到页表项
+        let entry = self.find_entry(vpn)?;
+        assert!(entry.is_empty(), "virtual address is already mapped");
+        // 页表项为空，则写入内容
+        *entry = PageTableEntry::new(ppn, flags);
+        Ok(())
+    }
+}
+```
+__第 3 步__  创建MemorySet
+创建os/src/memory/mapping/memory_set.rs，编辑内容如下:
+```
+//! 一个线程中关于内存空间的所有信息 [`MemorySet`]
+//!
+
+use crate::memory::{
+    address::*,
+    config::*,
+    mapping::{Flags, MapType, Mapping, Segment},
+    range::Range,
+    MemoryResult,
+};
+use alloc::{vec, vec::Vec};
+
+/// 一个进程所有关于内存空间管理的信息
+pub struct MemorySet {
+    /// 维护页表和映射关系
+    pub mapping: Mapping,
+    /// 每个字段
+    pub segments: Vec<Segment>,
+}
+
+impl MemorySet {
+    /// 创建内核重映射
+    pub fn new_kernel() -> MemoryResult<MemorySet> {
+        // 在 linker.ld 里面标记的各个字段的起始点，均为 4K 对齐
+        extern "C" {
+            fn text_start();
+            fn rodata_start();
+            fn data_start();
+            fn bss_start();
+        }
+
+        // 建立字段
+        let segments = vec![
+            // .text 段，r-x
+            Segment {
+                map_type: MapType::Linear,
+                range: Range::from((text_start as usize)..(rodata_start as usize)),
+                flags: Flags::READABLE | Flags::EXECUTABLE,
+            },
+            // .rodata 段，r--
+            Segment {
+                map_type: MapType::Linear,
+                range: Range::from((rodata_start as usize)..(data_start as usize)),
+                flags: Flags::READABLE,
+            },
+            // .data 段，rw-
+            Segment {
+                map_type: MapType::Linear,
+                range: Range::from((data_start as usize)..(bss_start as usize)),
+                flags: Flags::READABLE | Flags::WRITABLE,
+            },
+            // .bss 段，rw-
+            Segment {
+                map_type: MapType::Linear,
+                range: Range::from(VirtualAddress::from(bss_start as usize)..*KERNEL_END_ADDRESS),
+                flags: Flags::READABLE | Flags::WRITABLE,
+            },
+            // 剩余内存空间，rw-
+            Segment {
+                map_type: MapType::Linear,
+                range: Range::from(*KERNEL_END_ADDRESS..VirtualAddress::from(MEMORY_END_ADDRESS)),
+                flags: Flags::READABLE | Flags::WRITABLE,
+            },
+        ];
+        let mut mapping = Mapping::new()?;
+
+        // 每个字段在页表中进行映射
+        for segment in segments.iter() {
+            mapping.map(segment, None)?;
+        }
+        Ok(MemorySet {
+            mapping,
+            segments,
+        })
+    }
+
+    /// 替换 `satp` 以激活页表
+    ///
+    /// 如果当前页表就是自身，则不会替换，但仍然会刷新 TLB。
+    pub fn activate(&self) {
+        self.mapping.activate();
+    }
+
+    /// 添加一个 [`Segment`] 的内存映射
+    pub fn add_segment(&mut self, segment: Segment, init_data: Option<&[u8]>) -> MemoryResult<()> {
+        // 检测 segment 没有重合
+        assert!(!self.overlap_with(segment.page_range()));
+        // 映射
+        self.mapping.map(&segment, init_data)?;
+        self.segments.push(segment);
+        Ok(())
+    }
+
+    /// 移除一个 [`Segment`] 的内存映射
+    ///
+    /// `segment` 必须已经映射
+    pub fn remove_segment(&mut self, segment: &Segment) -> MemoryResult<()> {
+        // 找到对应的 segment
+        let segment_index = self
+            .segments
+            .iter()
+            .position(|s| s == segment)
+            .expect("segment to remove cannot be found");
+        self.segments.remove(segment_index);
+        // 移除映射
+        self.mapping.unmap(segment);
+        Ok(())
+    }
+
+    /// 检测一段内存区域和已有的是否存在重叠区域
+    pub fn overlap_with(&self, range: Range<VirtualPageNumber>) -> bool {
+        for seg in self.segments.iter() {
+            if range.overlap_with(&seg.page_range()) {
+                return true;
+            }
+        }
+        false
+    }
+}
+```
+
+__第 4 步__ 修改物理页追踪器
+在os/src/memory/frame/frame_tracker.rs 中加入如下代码：
+```
+
+/// `FrameTracker` 可以 deref 得到对应的 `[u8; PAGE_SIZE]`
+impl core::ops::Deref for FrameTracker {
+    type Target = [u8; PAGE_SIZE];
+    fn deref(&self) -> &Self::Target {
+        self.page_number().deref_kernel()
+    }
+}
+
+/// `FrameTracker` 可以 deref 得到对应的 `[u8; PAGE_SIZE]`
+impl core::ops::DerefMut for FrameTracker {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.page_number().deref_kernel()
+    }
+}
+```
+__第 5 步__ 编辑测试代码
+修改main.rs中的rust_main函数，内容如下：
+```
+/// Rust 的入口函数
+///
+/// 在 `_start` 为我们进行了一系列准备之后，这是第一个被调用的 Rust 函数
+#[no_mangle]
+pub extern "C" fn rust_main() -> ! {
+    // 初始化各种模块
+    interrupt::init();
+    memory::init();
+
+    let remap = memory::mapping::MemorySet::new_kernel().unwrap();
+    remap.activate();
+
+    println!("kernel remapped");
+
+    panic!()
+}
+```
+
+# 四，页面置换算法
+（虽说花了不少时间但是还是不能完全掌握）
+__第 1 步__
+在磁盘中建立一个页面置换文件，来保存所有换出的页面。user/Makefile内容如下：
+```
+# 编译、打包、格式转换、预留空间
+build: dependency
+    @cargo build
+    @echo Targets: $(patsubst $(SRC_DIR)/%.rs, %, $(SRC_FILES))
+    @rm -rf $(OUT_DIR)
+    @mkdir -p $(OUT_DIR)
+    @cp $(BIN_FILES) $(OUT_DIR)
+-->    @dd if=/dev/zero of=$(OUT_DIR)/SWAP_FILE bs=1M count=16
+    @rcore-fs-fuse --fs sfs $(IMG_FILE) $(OUT_DIR) zip
+    @qemu-img convert -f raw $(IMG_FILE) -O qcow2 $(QCOW_FILE)
+    @qemu-img resize $(QCOW_FILE) +1G
+```
+
+__第 2 步__
+创建os/src/fs/swap.rs文件。
+其中SwapTracker 记录了一个被置换出物理内存的页面，并提供一些便捷的操作接口。内容如下(详细内容见项目代码)：
+```
+/// 类似于 [`FrameTracker`]，相当于 `Box<置换文件中的一个页面>`
+///
+/// 内部保存该置换页面在文件中保存的 index
+///
+/// [`FrameTracker`]: crate::memory::frame::FrameTracker
+#[derive(Debug, Ord, PartialOrd, Eq, PartialEq, Hash)]
+pub struct SwapTracker(pub(super) usize);
+
+impl SwapTracker {
+    /// 从置换文件分配一个页面空间
+    pub fn new() -> MemoryResult<Self> {
+        ...
+    }
+
+    /// 读取页面数据
+    pub fn read(&self) -> [u8; PAGE_SIZE] {
+        ...
+    }
+
+    /// 写入页面数据
+    pub fn write(&self, data: &[u8; PAGE_SIZE]) {
+        ...
+    }
+}
+
+impl Drop for SwapTracker {
+    fn drop(&mut self) {
+        ...
+    }
+}
+```
+__第 3 步__
+创建swapper.rs，内容如下(具体内容见项目源码)：
+（其中Swapper 就替代了 Mapping 中的 mapped_pairs: Vec<(VirtualPageNumber, FrameTracker)> 的作用。）
+```
+/// 管理一个线程所映射的页面的置换操作
+pub trait Swapper {
+    /// 新建带有一个分配数量上限的置换器
+    fn new(quota: usize) -> Self;
+
+    /// 是否已达到上限
+    fn full(&self) -> bool;
+
+    /// 取出一组映射
+    fn pop(&mut self) -> Option<(VirtualPageNumber, FrameTracker)>;
+
+    /// 添加一组映射（不会在以达到分配上限时调用）
+    fn push(&mut self, vpn: VirtualPageNumber, frame: FrameTracker);
+
+    /// 只保留符合某种条件的条目（用于移除一段虚拟地址）
+    fn retain(&mut self, predicate: impl Fn(&VirtualPageNumber) -> bool);
+}
+```
+
+__第 4 步__
+修改os/src/memory/mapping/mapping.rs文件，mapping中被替换的内容：
+```
+impl Mapping {
+    /// 处理缺页异常
+    pub fn handle_page_fault(&mut self, stval: usize) -> MemoryResult<()> {
+        let vpn = VirtualPageNumber::floor(stval.into());
+        let swap_tracker = self
+            .swapped_pages
+            .remove(&vpn)
+            .ok_or("stval page is not mapped")?;
+        let page_data = swap_tracker.read();
+
+        if self.mapped_pairs.full() {
+            // 取出一个映射
+            let (popped_vpn, mut popped_frame) = self.mapped_pairs.pop().unwrap();
+            // print!("{:x?} -> {:x?}", popped_vpn, vpn);
+            // 交换数据
+            swap_tracker.write(&*popped_frame);
+            (*popped_frame).copy_from_slice(&page_data);
+            // 修改页表映射
+            self.invalidate_one(popped_vpn)?;
+            self.remap_one(vpn, popped_frame.page_number())?;
+            // 更新记录
+            self.mapped_pairs.push(vpn, popped_frame);
+            self.swapped_pages.insert(popped_vpn, swap_tracker);
+        } else {
+            // 如果当前还没有达到配额，则可以继续分配物理页面。这种情况目前还不会出现
+            // 添加新的映射
+            let mut frame = FRAME_ALLOCATOR.lock().alloc()?;
+            // 复制数据
+            (*frame).copy_from_slice(&page_data);
+            // 更新映射
+            self.remap_one(vpn, frame.page_number())?;
+            // 更新记录
+            self.mapped_pairs.push(vpn, frame);
+        }
+        Ok(())
+    }
+}
+```
+__第 5 步__
+修改os/src/interrupt/handler.rs文件，修改内容如下：
+```
+/// 处理缺页异常
+///
+/// todo: 理论上这里需要判断访问类型，并与页表中的标志位进行比对
+fn page_fault(context: &mut Context, stval: usize) -> Result<*mut Context, String> {
+    println!("page_fault");
+    let current_thread = PROCESSOR.get().current_thread();
+    let memory_set = &mut current_thread.process.write().memory_set;
+    memory_set.mapping.handle_page_fault(stval)?;
+    memory_set.activate();
+    Ok(context)
+}
+
+```
+(~~说实话，页面置换这块确实没做好。~~)
+代码的内容可见github上lab3文件夹，已实现部分实验结果以截图的方式存储。
+
+
+
 [1]:https://rcore-os.github.io/rCore-Tutorial-deploy/docs/lab-0/guide/intro.html
 [2]:https://rcore-os.github.io/rCore-Tutorial-deploy/docs/lab-1/guide/intro.html
 [3]:https://blog.csdn.net/weixin_41542958/article/details/107577542
@@ -1734,3 +2686,5 @@ fn test_page() -> !{
 [5]:https://blog.csdn.net/weixin_41542958/article/details/107617342
 [6]:https://rcore-os.github.io/rCore-Tutorial-deploy/docs/lab-2/guide/intro.html
 [7]:https://blog.csdn.net/weixin_41542958/article/details/107624186
+[8]:https://blog.csdn.net/weixin_41542958/article/details/107625823
+[9]:https://rcore-os.github.io/rCore-Tutorial-deploy/docs/lab-2/guide/intro.html
