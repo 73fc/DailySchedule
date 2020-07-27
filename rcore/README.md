@@ -1,11 +1,11 @@
 # 实验报告
 
 博客目录：
-1. [环境部署][3] 
-1. [lab0实验报告][4]
-1. [lab1实验报告][5]
-1. lab2实验报告
-1. lab3实验报告
+1.[环境部署][3] 
+2.[lab0实验报告][4]
+3.[lab1实验报告][5]
+4.[lab2实验报告][7]
+4.lab3实验报告
 (lab4-lab5实验报告暂未完成。)
 ---
 # lab0
@@ -1143,11 +1143,594 @@ pub extern "C" fn rust_main() -> ! {
 至此，lab1实验使用完成。源代码于实验题代码均在github中。
 
 
+# lab 2 
+本节主要内容为实现内存管理分配，并以页的方式对内存进行管理。
+[lab2实验指导书][6]
+实验完成后目录结构如下：
+```
+Project
+│  rust-toolchain
+│
+└─os
+    │  .gitignore
+    │  Cargo.lock
+    │  Cargo.toml
+    │  Makefile
+    │
+    ├─.cargo
+    │      config
+    │
+    └─src
+        │  console.rs
+        │  entry.asm
+        │  linker.ld
+        │  main.rs
+        │  panic.rs
+        │  sbi.rs
+        │
+        ├─algorithm
+        │  │  Cargo.toml
+        │  │
+        │  └─src
+        │      │  lib.rs
+        │      │  unsafe_wrapper.rs
+        │      │
+        │      ├─allocator
+        │      │      mod.rs
+        │      │      segment_tree_allocator.rs
+        │      │      stacked_allocator.rs
+        │      │
+        │      └─scheduler
+        │              fifo_scheduler.rs
+        │              hrrn_scheduler.rs
+        │              mod.rs
+        │
+        ├─allocator
+        │      mod.rs
+        │
+        ├─interrupt
+        │      context.rs
+        │      handler.rs
+        │      interrupt.asm
+        │      mod.rs
+        │      timer.rs
+        │
+        └─memory
+            │  address.rs
+            │  config.rs
+            │  heap.rs
+            │  mod.rs
+            │  range.rs
+            │
+            └─frame
+                    allocator.rs
+                    frame_tracker.rs
+                    mod.rs
+```
+
+## 一，动态内存分配
+
+### 1.1 动态内存分配简介
+动态内存分配指的在程序运行时所进行的动态内存分配，因为有的数据项只有在实际运行中才能确定其所需内存大小。
+与静态内存分配相比，动态内存分配可在运行过程中选择合适的实际分配所需的内存大小较为灵活，但相应的会带来一些开销。
+在rust中常见的动态内存分配有：
+* 智能指针Box<T> ，与C语言的 malloc 功能类似。
+* 引用计数 Rc<T>，原子引用计数 Arc<T>，主要用于在引用计数清零，即某对象不再被引用时，对该对象进行自动回收。
+* 一些 Rust std 标准库中的数据结构，如 Vec 和 HashMap 等。
+
+按照Rust的语法我们需要实现 Trait GlobalAlloc，将其实例化，主要内容即为实现以下两个函数：
+```
+unsafe fn alloc(&self, layout: Layout) -> *mut u8;
+unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout);
+
+```
+其中Layout是一个结构体，其一块连续的、大小至少为 size 字节的虚拟内存，且对齐要求为 align。其主要有两个字段，size 表示要分配的字节数，align 则表示分配的虚拟地址的最小对齐要求。其内容如下：
+```
+pub struct Layout {
+    // size of the requested block of memory, measured in bytes.
+    size_: usize,
+
+    // alignment of the requested block of memory, measured in bytes.
+    // we ensure that this is always a power-of-two, because API's
+    // like `posix_memalign` require it and it is a reasonable
+    // constraint to impose on Layout constructors.
+    //
+    // (However, we do not analogously require `align >= sizeof(void*)`,
+    //  even though that is *also* a requirement of `posix_memalign`.)
+    align_: NonZeroUsize,
+}
+```
+实现后使用语义项 #[global_allocator] 进行标记，使得编译器将其做为默认的动态内存分配函数。
+
+### 1.2 连续内存分配算法
+连续内存分配即为在内存分配时，分配地址连续的内存空间。其中会导致外碎片问题，并需要相应的碎片整合。
+
+外碎片：在连续地址分配中，若系统存在没有被利用且因为容量过小而无法被利用的内存空间，则其被称为外碎片。
+碎片整理： 当外部碎片过多时，可通过重新移动进程的内存来使得小的未利用空间聚合到一起变成大的未利用空间，这个过程即为碎片整合。
+
+内存分配算法有很多，这里使用伙伴系统（Buddy System）来解决问题。
+
+__第 1 步__  添加依赖
+为了使用已有的伙伴系统，需要在os/Cargo.toml添加依赖buddy_system_allocator = "0.3.9"。
+查看官方代码，发现后续要用到的依赖项很多，所以这里将剩下的依赖性全部添加进来了。
+```
+[dependencies]
+bit_field = "0.10.0"
+bitflags = "1.2.1"
+buddy_system_allocator = "0.3.9"        # 【就是这里】了
+hashbrown = "0.7.2"
+lazy_static = { version = "1.4.0", features = ["spin_no_std"] }
+riscv = { git = "https://github.com/rcore-os/riscv", features = ["inline-asm"] }
+spin = "0.5.2"
+device_tree = { git = "https://github.com/rcore-os/device_tree-rs" }
+virtio-drivers = { git = "https://github.com/rcore-os/virtio-drivers" }
+rcore-fs = { git = "https://github.com/rcore-os/rcore-fs"}
+rcore-fs-sfs = { git = "https://github.com/rcore-os/rcore-fs"}
+xmas-elf = "0.7.0"
+```
+
+__第 2 步__ 设计系统堆栈大小
+创建 os/src/memory/config.rs，用于存储一些配置相关的信息。 现设定OS堆栈大小为8M。
+```
+/// 操作系统动态分配内存所用的堆大小（8M）
+pub const KERNEL_HEAP_SIZE: usize = 0x80_0000;
+```
+
+__第 3 步__ 开辟空间
+创建os/src/memory/heap.rs，开辟一个8M静态数组作为堆空间，并实现相应的初始化等操作。
+```
+/// 进行动态内存分配所用的堆空间
+/// 
+/// 大小为 [`KERNEL_HEAP_SIZE`]  
+/// 这段空间编译后会被放在操作系统执行程序的 bss 段
+static mut HEAP_SPACE: [u8; KERNEL_HEAP_SIZE] = [0; KERNEL_HEAP_SIZE];
+
+/// 堆，动态内存分配器
+/// 
+/// ### `#[global_allocator]`
+/// [`LockedHeap`] 实现了 [`alloc::alloc::GlobalAlloc`] trait，
+/// 可以为全局需要用到堆的地方分配空间。例如 `Box` `Arc` 等
+#[global_allocator]
+static HEAP: LockedHeap = LockedHeap::empty();
+
+/// 初始化操作系统运行时堆空间
+pub fn init() {
+    // 告诉分配器使用这一段预留的空间作为堆
+    unsafe {
+        HEAP.lock().init(
+            HEAP_SPACE.as_ptr() as usize, KERNEL_HEAP_SIZE
+        )
+    }
+}
+
+/// 空间分配错误的回调，直接 panic 退出
+#[alloc_error_handler]
+fn alloc_error_handler(_: alloc::alloc::Layout) -> ! {
+    panic!("alloc error")
+}
+```
 
 
+__第 4 步__ 启动特性
+
+将 #![feature(alloc_error_handler)]添加到main.rs里面，启用相关特性。
+
+__第 5 步__ 模块化
+在memory文件夹中添加mod.rs，并加入以下内容：
+```
+//os/src/main.rs
+#![allow(dead_code)]
+mod heap;
+pub mod config;
+
+pub type MemoryResult<T> = Result<T, &'static str>;
+
+pub fn init() {
+    heap::init();
+    // 允许内核读写用户态内存
+    unsafe { riscv::register::sstatus::set_sum() };
+    println!("mod memory initialized");
+}
+
+```
+
+### 1.3 动态内存分配测试
+本节只是测试而已，内容不多。
+
+__第 1 步__
+在main.rs中加入mod memory引用模块;
+
+__第 2 步__
+修改 rust_main函数，添加如下测试代码。
+
+```
+#[no_mangle]
+pub extern "C" fn rust_main() -> ! {
+    // 初始化各种模块
+    interrupt::init();
+    memory::init();
+    
+    test_dynamic() // 动态内存分配测试
+    //test_physics()   // 物理内存分配测试
+    //test_page()       //物理页分配
+    
+}
+
+fn test_dynamic() ->!{
+    // 动态内存分配测试
+    use alloc::boxed::Box;
+    use alloc::vec::Vec;
+    let v = Box::new(5);
+    assert_eq!(*v, 5);
+    core::mem::drop(v);
+
+    let mut vec = Vec::new();
+    let mut v2 = Vec::new();
+    for i in 0..10000 {
+        vec.push(i);
+    }
+    for i in 0..7 {
+        v2.push(i);
+    }
+    assert_eq!(v2.len(),7);
+    assert_eq!(vec.len(), 10000);
+    for (i, value) in vec.into_iter().enumerate() {
+        assert_eq!(value, i);
+    }
+    println!("heap test passed");
+
+    panic!()
+}
+```
+
+## 二，物理内存探测
+
+### 2.1 物理内存的相关概念
+
+对于操作系统而言内存可看作为一个巨大的字节数组，按物理地址可对其字节进行读写访问。
+
+而通过 MMIO（Memory Mapped I/O）技术将可外设映射到一段物理地址，其他的外设也可以被标记上地址，并用地址读写的方式来访问各个外设。
+
+### 2.2 物理地址探测
+在 RISC-V 中，这个一般是由 bootloader，即 OpenSBI 固件来完成的。它来完成对于包括物理内存在内的各外设的扫描，将扫描结果以 DTB（Device Tree Blob）的格式保存在物理内存中的某个地方。随后 OpenSBI 固件会将其地址保存在 a1 寄存器中，给我们使用。
+
+我们知道，QEMU 规定的 DRAM 物理内存的起始物理地址为 0x80000000 。而在 QEMU 中，可以使用 -m 指定 RAM 的大小，默认是 128 MB 。因此，默认的 DRAM 物理内存地址范围就是 [0x80000000, 0x88000000)。
+
+本节主要目的是探测内核地址，具体实现如下：
+
+__第 1 步__ 实现PhysicalAddres类
+创建文件os/src/memory/address.rs，实现以下代码：
+```
+//! 定义地址类型和地址常量
+//!
+//! 我们为虚拟地址和物理地址分别设立两种类型，利用编译器检查来防止混淆。
+
+use super::config::PAGE_SIZE;
+
+/// 物理地址
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct PhysicalAddress(pub usize);
+
+/// 物理页号
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct PhysicalPageNumber(pub usize);
+
+// 以下是一大堆类型的相互转换、各种琐碎操作
+
+impl PhysicalAddress {
+    /// 取得页内偏移
+    pub fn page_offset(&self) -> usize {
+        self.0 % PAGE_SIZE
+    }
+}
+
+macro_rules! implement_address_to_page_number {
+    // 这里面的类型转换实现 [`From`] trait，会自动实现相反的 [`Into`] trait
+    ($address_type: ty, $page_number_type: ty) => {
+        impl From<$page_number_type> for $address_type {
+            /// 从页号转换为地址
+            fn from(page_number: $page_number_type) -> Self {
+                Self(page_number.0 * PAGE_SIZE)
+            }
+        }
+        impl From<$address_type> for $page_number_type {
+            /// 从地址转换为页号，直接进行移位操作
+            ///
+            /// 不允许转换没有对齐的地址，这种情况应当使用 `floor()` 和 `ceil()`
+            fn from(address: $address_type) -> Self {
+                assert!(address.0 % PAGE_SIZE == 0);
+                Self(address.0 / PAGE_SIZE)
+            }
+        }
+        impl $page_number_type {
+            /// 将地址转换为页号，向下取整
+            pub const fn floor(address: $address_type) -> Self {
+                Self(address.0 / PAGE_SIZE)
+            }
+            /// 将地址转换为页号，向上取整
+            pub const fn ceil(address: $address_type) -> Self {
+                Self(address.0 / PAGE_SIZE + (address.0 % PAGE_SIZE != 0) as usize)
+            }
+        }
+    };
+}
+implement_address_to_page_number! {PhysicalAddress, PhysicalPageNumber}
+
+// 下面这些以后可能会删掉一些
+
+/// 为各种仅包含一个 usize 的类型实现运算操作
+macro_rules! implement_usize_operations {
+    ($type_name: ty) => {
+        /// `+`
+        impl core::ops::Add<usize> for $type_name {
+            type Output = Self;
+            fn add(self, other: usize) -> Self::Output {
+                Self(self.0 + other)
+            }
+        }
+        /// `+=`
+        impl core::ops::AddAssign<usize> for $type_name {
+            fn add_assign(&mut self, rhs: usize) {
+                self.0 += rhs;
+            }
+        }
+        /// `-`
+        impl core::ops::Sub<usize> for $type_name {
+            type Output = Self;
+            fn sub(self, other: usize) -> Self::Output {
+                Self(self.0 - other)
+            }
+        }
+        /// `-`
+        impl core::ops::Sub<$type_name> for $type_name {
+            type Output = usize;
+            fn sub(self, other: $type_name) -> Self::Output {
+                self.0 - other.0
+            }
+        }
+        /// `-=`
+        impl core::ops::SubAssign<usize> for $type_name {
+            fn sub_assign(&mut self, rhs: usize) {
+                self.0 -= rhs;
+            }
+        }
+        /// 和 usize 相互转换
+        impl From<usize> for $type_name {
+            fn from(value: usize) -> Self {
+                Self(value)
+            }
+        }
+        /// 和 usize 相互转换
+        impl From<$type_name> for usize {
+            fn from(value: $type_name) -> Self {
+                value.0
+            }
+        }
+        impl $type_name {
+            /// 是否有效（0 为无效）
+            pub fn valid(&self) -> bool {
+                self.0 != 0
+            }
+        }
+        /// {} 输出
+        impl core::fmt::Display for $type_name {
+            fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                write!(f, "{}(0x{:x})", stringify!($type_name), self.0)
+            }
+        }
+    };
+}
+implement_usize_operations! {PhysicalAddress}
+implement_usize_operations! {PhysicalPageNumber}
+```
+
+__第 2 步__
+在os/src/memory/config.rs中添加如下配置：
+```
+use super::address::*;
+use lazy_static::*;
+
+/// 页 / 帧大小，必须是 2^n
+pub const PAGE_SIZE: usize = 4096;
+/// 操作系统动态分配内存所用的堆大小（8M）
+pub const KERNEL_HEAP_SIZE: usize = 0x80_0000;
+
+
+/// 可以访问的内存区域起始地址
+pub const MEMORY_START_ADDRESS: PhysicalAddress = PhysicalAddress(0x8000_0000);
+/// 可以访问的内存区域结束地址
+pub const MEMORY_END_ADDRESS: PhysicalAddress = PhysicalAddress(0x8800_0000);
+
+lazy_static! {
+    /// 内核代码结束的地址，即可以用来分配的内存起始地址
+    ///
+    /// 因为 Rust 语言限制，我们只能将其作为一个运行时求值的 static 变量，而不能作为 const
+    pub static ref KERNEL_END_ADDRESS: PhysicalAddress = PhysicalAddress(kernel_end as usize);
+}
+
+extern "C" {
+    /// 由 `linker.ld` 指定的内核代码结束位置
+    ///
+    /// 作为变量存在 [`KERNEL_END_ADDRESS`]
+    fn kernel_end();
+}
+```
+
+__第 3 步__ 修改mod.rs文件
+
+在 os/src/memory/mod.rs加入
+```
+mod address;
+```
+__第 4 步__ 修改main.rs 添加测试代码
+在main.rs中修改rust_main函数，添加如下代码：
+```
+#[no_mangle]
+pub extern "C" fn rust_main() -> ! {
+    // 初始化各种模块
+    interrupt::init();
+    memory::init();
+    
+    //test_dynamic() // 动态内存分配测试
+    test_physics()   // 物理内存分配测试
+   // test_page()       //物理页分配
+}
+
+fn test_physics() ->!{
+    println!("{}", *memory::config::KERNEL_END_ADDRESS);
+    panic!("物理内存地址分配")
+}
+```
+
+## 三，物理内存管理
+物理页（Frame），即连续的 4 KB 字节为的内存分配。
+我们希望用物理页号（Physical Page Number，PPN）来代表一物理页，通过设定的兑换公式来完成物理页号与物理页的一一映射。
+本节内容为实现以页为单位的内存分配算法。
+本实验会用到一些书中未提及的模块，比如algorithm，项目中已经将其导入，并添加了相关的依赖。
+
+__第 1 步__ 修改配置文件config.rs
+```
+/// 可以访问的内存区域起始地址
+pub const MEMORY_START_ADDRESS: PhysicalAddress = PhysicalAddress(0x8000_0000);
+/// 可以访问的内存区域结束地址
+pub const MEMORY_END_ADDRESS: PhysicalAddress = PhysicalAddress(0x8800_0000);
+```
+
+
+__第 2 步__ 实现物理页追踪器
+创建文件os/src/memory/frame/frame_tracker.rs，编辑以下内容：
+```
+pub struct FrameTracker(pub(super) PhysicalPageNumber);
+
+impl FrameTracker {
+    /// 帧的物理地址
+    pub fn address(&self) -> PhysicalAddress {
+        self.0.into()
+    }
+    /// 帧的物理页号
+    pub fn page_number(&self) -> PhysicalPageNumber {
+        self.0
+    }
+}
+
+/// 帧在释放时会放回 [`static@FRAME_ALLOCATOR`] 的空闲链表中
+impl Drop for FrameTracker {
+    fn drop(&mut self) {
+        FRAME_ALLOCATOR.lock().dealloc(self);
+    }
+}
+```
+
+__第 3 步__ 创建物理页分配器
+创建文件os/src/memory/frame/allocator.rs，编辑以下内容：
+
+```
+lazy_static! {
+    /// 帧分配器
+    pub static ref FRAME_ALLOCATOR: Mutex<FrameAllocator<AllocatorImpl>> = Mutex::new(FrameAllocator::new(Range::from(
+            PhysicalPageNumber::ceil(PhysicalAddress::from(*KERNEL_END_ADDRESS))..PhysicalPageNumber::floor(MEMORY_END_ADDRESS),
+        )
+    ));
+}
+
+/// 基于线段树的帧分配 / 回收
+pub struct FrameAllocator<T: Allocator> {
+    /// 可用区间的起始
+    start_ppn: PhysicalPageNumber,
+    /// 分配器
+    allocator: T,
+}
+
+impl<T: Allocator> FrameAllocator<T> {
+    /// 创建对象
+    pub fn new(range: impl Into<Range<PhysicalPageNumber>> + Copy) -> Self {
+        FrameAllocator {
+            start_ppn: range.into().start,
+            allocator: T::new(range.into().len()),
+        }
+    }
+
+    /// 分配帧，如果没有剩余则返回 `Err`
+    pub fn alloc(&mut self) -> MemoryResult<FrameTracker> {
+        self.allocator
+            .alloc()
+            .ok_or("no available frame to allocate")
+            .map(|offset| FrameTracker(self.start_ppn + offset))
+    }
+
+    /// 将被释放的帧添加到空闲列表的尾部
+    ///
+    /// 这个函数会在 [`FrameTracker`] 被 drop 时自动调用，不应在其他地方调用
+    pub(super) fn dealloc(&mut self, frame: &FrameTracker) {
+        self.allocator.dealloc(frame.page_number() - self.start_ppn);
+    }
+}
+```
+__第 4 步__ 模块化
+创建os/src/memory/frame/mod.rs文件，编辑内容如下：
+```
+mod allocator;
+mod frame_tracker;
+
+pub use allocator::FRAME_ALLOCATOR;
+pub use frame_tracker::FrameTracker;
+```
+
+
+__第 5 步__ 实现封装分配器相关的trait
+创建文件os/src/algorithm/src/allocator/mod.rs，编辑以下内容：
+```
+/// 分配器：固定容量，每次分配 / 回收一个元素
+pub trait Allocator {
+    /// 给定容量，创建分配器
+    fn new(capacity: usize) -> Self;
+    /// 分配一个元素，无法分配则返回 `None`
+    fn alloc(&mut self) -> Option<usize>;
+    /// 回收一个元素
+    fn dealloc(&mut self, index: usize);
+}
+```
+(算法模块已经导入)
+
+__第 6 步__ 编辑测试代码
+修改main.rs如下：
+```
+#[no_mangle]
+pub extern "C" fn rust_main() -> ! {
+    // 初始化各种模块
+    interrupt::init();
+    memory::init();
+    
+    //test_dynamic() // 动态内存分配测试
+    //test_physics()   // 物理内存分配测试
+    test_page()       //物理页分配
+    
+}
+
+fn test_page() -> !{
+    for _ in 0..2 {
+        let frame_0 = match memory::frame::FRAME_ALLOCATOR.lock().alloc() {
+            Result::Ok(frame_tracker) => frame_tracker,
+            Result::Err(err) => panic!("{}", err)
+        };
+        let frame_1 = match memory::frame::FRAME_ALLOCATOR.lock().alloc() {
+            Result::Ok(frame_tracker) => frame_tracker,
+            Result::Err(err) => panic!("{}", err)
+        };
+        println!("{} and {}", frame_0.address(), frame_1.address());
+    }
+
+    panic!()
+}
+```
+实验结果以截图的方式存储在lab2文件夹中，居然内容见GitHub。
 
 [1]:https://rcore-os.github.io/rCore-Tutorial-deploy/docs/lab-0/guide/intro.html
 [2]:https://rcore-os.github.io/rCore-Tutorial-deploy/docs/lab-1/guide/intro.html
 [3]:https://blog.csdn.net/weixin_41542958/article/details/107577542
 [4]:https://blog.csdn.net/weixin_41542958/article/details/107612922
 [5]:https://blog.csdn.net/weixin_41542958/article/details/107617342
+[6]:https://rcore-os.github.io/rCore-Tutorial-deploy/docs/lab-2/guide/intro.html
+[7]:https://blog.csdn.net/weixin_41542958/article/details/107624186
